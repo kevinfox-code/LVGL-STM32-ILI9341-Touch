@@ -76,6 +76,23 @@ static void MX_I2C1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#define PRESSURE_HISTORY_LEN 20
+static lv_chart_series_t *pressure_series = NULL;
+static lv_coord_t pressure_history[PRESSURE_HISTORY_LEN] = {0};
+
+void pressure_chart_init(void) {
+    // Set chart Y range and point count (already set in SLS, but safe to repeat)
+    lv_chart_set_range(ui_PressureChart, LV_CHART_AXIS_PRIMARY_Y, 950, 1050);
+    lv_chart_set_point_count(ui_PressureChart, PRESSURE_HISTORY_LEN);
+
+    // Add the series and attach the external data array
+    pressure_series = lv_chart_add_series(ui_PressureChart, lv_color_hex(0x04F625), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_ext_y_array(ui_PressureChart, pressure_series, pressure_history);
+
+    // Initialize with a typical value (e.g., 1013 hPa)
+    for (int i = 0; i < PRESSURE_HISTORY_LEN; i++) pressure_history[i] = 1013;
+    lv_chart_refresh(ui_PressureChart);
+}
 
 
 
@@ -126,6 +143,10 @@ int main(void)
 
   ui_init();
 
+  lv_arc_set_range(ui_Arc1, 0, 50);      // Temperature arc: 0–50°C
+  lv_arc_set_range(ui_HumidArc, 0, 100); // Humidity arc: 0–100% RH
+  pressure_chart_init();
+
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 
   // — Initialize the sensor over I2C1 at address 0x77 —
@@ -159,58 +180,86 @@ int main(void)
 	  uint8_t n_fields;
 
 	  if (BME68x_ReadData(&hbme, &data, &n_fields) == BME68X_OK && n_fields) {
-	      float temp_c = data.temperature;
-	      float hum_rh = data.humidity;
-	      float pres_hpa = data.pressure  / 100.0f;
-	      float gas_kohm = data.gas_resistance;
 
-	      printf("T: %.1f°C  H: %.1f%%  P: %.1fhPa  G: %.1fkΩ\r\n",
-	            temp_c, hum_rh, pres_hpa, gas_kohm);
+		// --- Temperature Card ---
+		float temp_c = data.temperature;
+		float temp_f = temp_c * 9.0f / 5.0f + 32.0f;
+		char temp_str[16];
+		snprintf(temp_str, sizeof(temp_str), "%.1f°C", temp_c);
+		lv_label_set_text(ui_Label1, temp_str);
+		char tempf_str[16];
+		snprintf(tempf_str, sizeof(tempf_str), "%.1f°F", temp_f);
+		lv_label_set_text(ui_FDegLabel, tempf_str);
+		lv_arc_set_value(ui_Arc1, (int)(temp_c));
+		// Color gradient: blue (≤20°C) to red (≥40°C)
+		lv_color_t temp_color;
+		if (temp_c <= 20.0f) temp_color = lv_color_hex(0x0000FF);
+		else if (temp_c >= 40.0f) temp_color = lv_color_hex(0xFF0000);
+		else {
+			uint8_t r = (uint8_t)(255 * (temp_c - 20.0f) / 20.0f);
+			uint8_t b = 255 - r;
+			temp_color = lv_color_make(r, 0, b);
+		}
+		lv_obj_set_style_arc_color(ui_Arc1, temp_color, LV_PART_INDICATOR);
 
-	      // --- Temperature Card Update ---
-	      char temp_str[16];
-	      snprintf(temp_str, sizeof(temp_str), "%.1f °C", temp_c);
-	      lv_label_set_text(ui_Label1, temp_str);
-	      lv_arc_set_value(ui_Arc1, (int)(temp_c));
-	      lv_color_t temp_color;
-	      if (temp_c <= 20.0f) {
-	          temp_color = lv_color_hex(0x0000FF); // blue
-	      } else if (temp_c >= 40.0f) {
-	          temp_color = lv_color_hex(0xFF0000); // red
-	      } else {
-	          uint8_t r = (uint8_t)(255 * (temp_c - 20.0f) / 20.0f);
-	          uint8_t b = 255 - r;
-	          temp_color = lv_color_make(r, 0, b);
-	      }
-	      lv_obj_set_style_arc_color(ui_Arc1, temp_color, LV_PART_INDICATOR);
 
-	      // --- Humidity Card Update ---
-	      char hum_str[16];
-	      snprintf(hum_str, sizeof(hum_str), "%.1f %%", hum_rh);
-	      lv_label_set_text(ui_Label2, hum_str);
-	      lv_arc_set_value(ui_HumidArc, (int)(hum_rh));
-	      lv_color_t hum_color;
-	      if (hum_rh <= 30.0f) {
-	          hum_color = lv_color_hex(0x00BFFF); // light blue
-	      } else if (hum_rh >= 80.0f) {
-	          hum_color = lv_color_hex(0x00008B); // deep blue
-	      } else {
-	          uint8_t b = 255 - (uint8_t)(127 * (hum_rh - 30.0f) / 50.0f);
-	          hum_color = lv_color_make(0, 191, b);
-	      }
-	      lv_obj_set_style_arc_color(ui_HumidArc, hum_color, LV_PART_INDICATOR);
+		// --- Humidity Card ---
+		float hum_rh = data.humidity;
+		char hum_str[16];
+		snprintf(hum_str, sizeof(hum_str), "%.1f%%", hum_rh);
+		lv_label_set_text(ui_Label2, hum_str);
+		lv_arc_set_value(ui_HumidArc, (int)(hum_rh));
+		// Color gradient: light blue (≤30%) to deep blue (≥80%)
+		lv_color_t hum_color;
+		if (hum_rh <= 30.0f) hum_color = lv_color_hex(0x00BFFF);
+		else if (hum_rh >= 80.0f) hum_color = lv_color_hex(0x00008B);
+		else {
+			uint8_t b = 255 - (uint8_t)(127 * (hum_rh - 30.0f) / 50.0f);
+			hum_color = lv_color_make(0, 191, b);
+		}
+		lv_obj_set_style_arc_color(ui_HumidArc, hum_color, LV_PART_INDICATOR);
+
+
+		// --- Pressure Card & Chart ---
+		float pres_hpa = data.pressure / 100.0f;
+		char pres_str[16];
+		snprintf(pres_str, sizeof(pres_str), "%.1f hPa", pres_hpa);
+		lv_label_set_text(ui_PressLabel, pres_str);
+
+		// Color alert for storms
+		if (pres_hpa < 990.0f) {
+			lv_obj_set_style_text_color(ui_PressLabel, lv_color_hex(0xFF0000), 0); // Red for low pressure
+		} else {
+			lv_obj_set_style_text_color(ui_PressLabel, lv_color_hex(0xFFFFFF), 0); // White for normal (on gray BG)
+		}
+
+		// Update the chart history
+		static uint8_t pressure_idx = 0;
+		pressure_history[pressure_idx] = pres_hpa;
+		pressure_idx = (pressure_idx + 1) % PRESSURE_HISTORY_LEN;
+		lv_chart_refresh(ui_PressureChart);
+
+
+		// --- Air Resistance Card ---
+		float gas_kohm = data.gas_resistance / 1000.0f;
+		char air_str[16];
+		snprintf(air_str, sizeof(air_str), "%.1f kΩ", gas_kohm);
+		lv_label_set_text(ui_AirResistanceOutputLabel, air_str);
+
+		// Color code: green (good), yellow (fair), red (poor)
+		lv_color_t air_color;
+		if (gas_kohm > 50) air_color = lv_color_hex(0x00FF00);
+		else if (gas_kohm > 10) air_color = lv_color_hex(0xFFFF00);
+		else air_color = lv_color_hex(0xFF0000);
+		lv_obj_set_style_text_color(ui_AirResistanceOutputLabel, air_color, LV_PART_MAIN | LV_STATE_DEFAULT);
 
 	  } else {
-	      printf("Failed to read data or no fields available.\r\n");
+		  printf("Failed to read data or no fields available.\r\n");
 	  }
-
-
 
 	  lv_timer_handler();
 	  HAL_Delay(5);
 
-
-        
   }
   /* USER CODE END 3 */
 }
@@ -273,35 +322,6 @@ void SystemClock_Config(void)
   * @param None
   * @retval None
   */
-static void MX_I2C1_Init(void)
-{
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 400000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
-}
-
 /**
   * @brief SPI1 Initialization Function
   * @param None
@@ -548,6 +568,35 @@ static void MX_GPIO_Init(void)
   * @brief  This function is executed in case of error occurrence.
   * @retval None
   */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
