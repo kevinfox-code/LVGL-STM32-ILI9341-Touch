@@ -11,6 +11,12 @@ application shown on the screen.
   environmental-sensor integration.
 - [`variants/pwm-slider`](variants/pwm-slider): SquareLine/LVGL PWM slider
   interface.
+- [`variants/squareline-base`](variants/squareline-base): Original STM32F446RE
+  SquareLine/LVGL base project.
+- [`variants/lvgl-start`](variants/lvgl-start): Bare-metal LVGL touchscreen
+  starter/demo project.
+- [`variants/pwm-slider-legacy`](variants/pwm-slider-legacy): Earlier PWM
+  slider project retained for comparison and migration.
 
 ## Shared wiring
 
