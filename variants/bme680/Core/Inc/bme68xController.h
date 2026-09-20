@@ -4,9 +4,13 @@
 
 #include "bme68x.h"
 #include "stm32f4xx_hal.h"
+#include <stdbool.h>
 
 // Handle type for BME68x peripheral
 typedef struct {
+    bool measurement_pending;
+    uint32_t measurement_started;
+    uint32_t measurement_wait_ms;
     I2C_HandleTypeDef *hi2c;    // HAL I2C handle
     uint8_t address;            // 7-bit I2C address (0x76 or 0x77)
     struct bme68x_dev dev;      // Bosch sensor device struct
@@ -34,7 +38,9 @@ int8_t BME68x_Config(BME68x_HandleTypeDef *h,
                      uint16_t heatr_temp, uint16_t heatr_dur);
 
 /**
- * @brief Trigger a forced-mode measurement and read data
+ * @brief Start/poll a forced-mode measurement without waiting for conversion.
+ * Call repeatedly from the foreground. BME68X_W_NO_NEW_DATA with zero fields
+ * means conversion is pending; BME68X_OK supplies the completed sample.
  * @param h         Pointer to BME68x handle
  * @param data      Output data struct (single measurement)
  * @param n_fields  Number of valid data fields (0 or 1)

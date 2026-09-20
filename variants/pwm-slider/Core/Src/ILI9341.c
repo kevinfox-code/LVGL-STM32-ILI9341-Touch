@@ -2,206 +2,244 @@
 #include "main.h"
 
 extern SPI_HandleTypeDef ILI9341_SPI;
-
-#define CS_LOW()  HAL_GPIO_WritePin(ILI9341_CS_PORT, ILI9341_CS_PIN, GPIO_PIN_RESET)
+#define CS_LOW() HAL_GPIO_WritePin(ILI9341_CS_PORT, ILI9341_CS_PIN, GPIO_PIN_RESET)
 #define CS_HIGH() HAL_GPIO_WritePin(ILI9341_CS_PORT, ILI9341_CS_PIN, GPIO_PIN_SET)
-
-#define DC_LOW()  HAL_GPIO_WritePin(ILI9341_DC_PORT, ILI9341_DC_PIN, GPIO_PIN_RESET)
+#define DC_LOW() HAL_GPIO_WritePin(ILI9341_DC_PORT, ILI9341_DC_PIN, GPIO_PIN_RESET)
 #define DC_HIGH() HAL_GPIO_WritePin(ILI9341_DC_PORT, ILI9341_DC_PIN, GPIO_PIN_SET)
+#define SPI_TIMEOUT_MS 100U
+#define DMA_MAX_BYTES 65534U
 
-#define RESET_LOW()  HAL_GPIO_WritePin(ILI9341_RESET_PORT, ILI9341_RESET_PIN, GPIO_PIN_RESET)
-#define RESET_HIGH() HAL_GPIO_WritePin(ILI9341_RESET_PORT, ILI9341_RESET_PIN, GPIO_PIN_SET)
+static uint16_t width = ILI9341_WIDTH;
+static uint16_t height = ILI9341_HEIGHT;
+static volatile bool dma_done;
+static volatile HAL_StatusTypeDef dma_result;
+static bool dma_active;
+static uint32_t dma_started;
 
-static void ILI9341_Write(uint8_t *data, uint16_t size) {
-    HAL_SPI_Transmit(&ILI9341_SPI, data, size, HAL_MAX_DELAY);
+/* Callbacks only publish completion; the foreground owns CS and recovery. */
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *spi)
+{
+    if (spi == &ILI9341_SPI) {
+        dma_result = HAL_OK;
+        dma_done = true;
+    }
 }
 
-void ILI9341_WriteCommand(uint8_t cmd) {
-    DC_LOW();
-    CS_LOW();
-    ILI9341_Write(&cmd, 1);
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *spi)
+{
+    if (spi == &ILI9341_SPI) {
+        dma_result = HAL_ERROR;
+        dma_done = true;
+    }
+}
+
+HAL_StatusTypeDef ILI9341_WaitTransfer(void)
+{
+    if (!dma_active) return HAL_OK;
+    while (!dma_done && (uint32_t)(HAL_GetTick() - dma_started) < SPI_TIMEOUT_MS) {}
+    HAL_StatusTypeDef result = dma_done ? dma_result : HAL_TIMEOUT;
+    if (result != HAL_OK) {
+        /* Stop DMA before LVGL can reuse its source buffer. */
+        if (HAL_SPI_Abort(&ILI9341_SPI) != HAL_OK) Error_Handler();
+    }
     CS_HIGH();
+    dma_active = false;
+    return result;
 }
 
-void ILI9341_WriteData(uint8_t data) {
-    DC_HIGH();
+static HAL_StatusTypeDef write_bytes(uint8_t *data, uint16_t size, bool command)
+{
+    HAL_StatusTypeDef result = ILI9341_WaitTransfer();
+    if (result != HAL_OK) return result;
+    if (command) DC_LOW(); else DC_HIGH();
     CS_LOW();
-    ILI9341_Write(&data, 1);
+    result = HAL_SPI_Transmit(&ILI9341_SPI, data, size, SPI_TIMEOUT_MS);
     CS_HIGH();
+    return result;
 }
 
-void ILI9341_WriteData16(uint16_t data) {
-    uint8_t buf[2] = {data >> 8, data & 0xFF};
-    DC_HIGH();
-    CS_LOW();
-    ILI9341_Write(buf, 2);
-    CS_HIGH();
+HAL_StatusTypeDef ILI9341_WriteCommand(uint8_t cmd) { return write_bytes(&cmd, 1, true); }
+HAL_StatusTypeDef ILI9341_WriteData(uint8_t data) { return write_bytes(&data, 1, false); }
+HAL_StatusTypeDef ILI9341_WriteData16(uint16_t data)
+{
+    uint8_t bytes[2] = {data >> 8, data & 0xff};
+    return write_bytes(bytes, sizeof(bytes), false);
 }
 
-void ILI9341_Reset(void) {
-    RESET_LOW();
+static void ILI9341_Reset(void)
+{
+    CS_HIGH();
+    HAL_GPIO_WritePin(ILI9341_RESET_PORT, ILI9341_RESET_PIN, GPIO_PIN_RESET);
     HAL_Delay(20);
-    RESET_HIGH();
+    HAL_GPIO_WritePin(ILI9341_RESET_PORT, ILI9341_RESET_PIN, GPIO_PIN_SET);
     HAL_Delay(150);
 }
 
-void ILI9341_Init(void) {
+HAL_StatusTypeDef ILI9341_Init(void) {
     ILI9341_Reset();
 
-    ILI9341_WriteCommand(0x01);
+    if (ILI9341_WriteCommand(0x01) != HAL_OK) return HAL_ERROR;
     HAL_Delay(10);
-    ILI9341_WriteCommand(0x28);
+    if (ILI9341_WriteCommand(0x28) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xCF);
-    ILI9341_WriteData(0x00);
-    ILI9341_WriteData(0xC1);
-    ILI9341_WriteData(0x30);
+    if (ILI9341_WriteCommand(0xCF) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0xC1) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x30) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xED);
-    ILI9341_WriteData(0x64);
-    ILI9341_WriteData(0x03);
-    ILI9341_WriteData(0x12);
-    ILI9341_WriteData(0x81);
+    if (ILI9341_WriteCommand(0xED) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x64) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x03) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x12) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x81) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xE8);
-    ILI9341_WriteData(0x85);
-    ILI9341_WriteData(0x00);
-    ILI9341_WriteData(0x78);
+    if (ILI9341_WriteCommand(0xE8) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x85) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x78) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xCB);
-    ILI9341_WriteData(0x39);
-    ILI9341_WriteData(0x2C);
-    ILI9341_WriteData(0x00);
-    ILI9341_WriteData(0x34);
-    ILI9341_WriteData(0x02);
+    if (ILI9341_WriteCommand(0xCB) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x39) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x2C) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x34) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x02) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xF7);
-    ILI9341_WriteData(0x20);
+    if (ILI9341_WriteCommand(0xF7) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x20) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xEA);
-    ILI9341_WriteData(0x00);
-    ILI9341_WriteData(0x00);
+    if (ILI9341_WriteCommand(0xEA) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xC0);
-    ILI9341_WriteData(0x23);
+    if (ILI9341_WriteCommand(0xC0) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x23) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xC1);
-    ILI9341_WriteData(0x10);
+    if (ILI9341_WriteCommand(0xC1) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x10) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xC5);
-    ILI9341_WriteData(0x3e);
-    ILI9341_WriteData(0x28);
+    if (ILI9341_WriteCommand(0xC5) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x3e) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x28) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xC7);
-    ILI9341_WriteData(0x86);
+    if (ILI9341_WriteCommand(0xC7) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x86) != HAL_OK) return HAL_ERROR;
 
-//    ILI9341_WriteCommand(0x36);
-//    ILI9341_WriteData(0x48);
 
-    ILI9341_WriteCommand(0x3A);
-    ILI9341_WriteData(0x55);
+    if (ILI9341_WriteCommand(0x3A) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x55) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xB1);
-    ILI9341_WriteData(0x00);
-    ILI9341_WriteData(0x18);
+    if (ILI9341_WriteCommand(0xB1) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x18) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xB6);
-    ILI9341_WriteData(0x08);
-    ILI9341_WriteData(0x82);
-    ILI9341_WriteData(0x27);
+    if (ILI9341_WriteCommand(0xB6) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x08) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x82) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x27) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0xF2);
-    ILI9341_WriteData(0x00);
+    if (ILI9341_WriteCommand(0xF2) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x00) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0x26);
-    ILI9341_WriteData(0x01);
+    if (ILI9341_WriteCommand(0x26) != HAL_OK) return HAL_ERROR;
+    if (ILI9341_WriteData(0x01) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_WriteCommand(0x11);
+    if (ILI9341_WriteCommand(0x11) != HAL_OK) return HAL_ERROR;
     HAL_Delay(120);
-    ILI9341_WriteCommand(0x29);
+    if (ILI9341_WriteCommand(0x29) != HAL_OK) return HAL_ERROR;
 
-    ILI9341_SetRotation(3);
+    return ILI9341_SetRotation(3);
 }
 
-void ILI9341_FillScreen(uint16_t color) {
-    uint8_t hi = color >> 8;
-    uint8_t lo = color & 0xFF;
-    uint8_t buf[ILI9341_WIDTH * 2];
-
-    for (int i = 0; i < ILI9341_WIDTH; ++i) {
-        buf[2 * i] = hi;
-        buf[2 * i + 1] = lo;
+HAL_StatusTypeDef ILI9341_SetRotation(uint8_t rotation)
+{
+    static const uint8_t madctl[] = {0x48, 0x28, 0x88, 0xE8};
+    if (rotation > 3) return HAL_ERROR;
+    HAL_StatusTypeDef result = ILI9341_WriteCommand(0x36);
+    if (result == HAL_OK) result = ILI9341_WriteData(madctl[rotation]);
+    if (result == HAL_OK) {
+        width = (rotation & 1U) ? ILI9341_HEIGHT : ILI9341_WIDTH;
+        height = (rotation & 1U) ? ILI9341_WIDTH : ILI9341_HEIGHT;
     }
+    return result;
+}
 
-    ILI9341_WriteCommand(0x2A);
-    ILI9341_WriteData(0x00); ILI9341_WriteData(0);
-    ILI9341_WriteData(0x00); ILI9341_WriteData(ILI9341_WIDTH - 1);
+HAL_StatusTypeDef ILI9341_SetWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (x0 > x1 || y0 > y1 || x1 >= width || y1 >= height) return HAL_ERROR;
+    HAL_StatusTypeDef result = ILI9341_WriteCommand(0x2A);
+    if (result == HAL_OK) result = ILI9341_WriteData16(x0);
+    if (result == HAL_OK) result = ILI9341_WriteData16(x1);
+    if (result == HAL_OK) result = ILI9341_WriteCommand(0x2B);
+    if (result == HAL_OK) result = ILI9341_WriteData16(y0);
+    if (result == HAL_OK) result = ILI9341_WriteData16(y1);
+    return result;
+}
 
-    ILI9341_WriteCommand(0x2B);
-    ILI9341_WriteData(0x00); ILI9341_WriteData(0);
-    ILI9341_WriteData(0x01); ILI9341_WriteData(ILI9341_HEIGHT - 1);
-
-    ILI9341_WriteCommand(0x2C);
+HAL_StatusTypeDef ILI9341_DrawBitmap(uint16_t w, uint16_t h, uint8_t *pixels)
+{
+    if (w == 0 || h == 0) return HAL_OK;
+    if (!pixels || w > width || h > height) return HAL_ERROR;
+    HAL_StatusTypeDef result = ILI9341_WriteCommand(0x2C);
+    if (result != HAL_OK) return result;
+    uint32_t remaining = (uint32_t)w * h * 2U;
     DC_HIGH();
     CS_LOW();
-    for (int y = 0; y < ILI9341_HEIGHT; y++) {
-        HAL_SPI_Transmit(&ILI9341_SPI, buf, ILI9341_WIDTH * 2, HAL_MAX_DELAY);
+    while (remaining && result == HAL_OK) {
+        uint16_t count = remaining > DMA_MAX_BYTES ? DMA_MAX_BYTES : (uint16_t)remaining;
+        result = HAL_SPI_Transmit(&ILI9341_SPI, pixels, count, SPI_TIMEOUT_MS);
+        pixels += count;
+        remaining -= count;
     }
     CS_HIGH();
+    return result;
 }
 
-void ILI9341_SetRotation(uint8_t m)
+HAL_StatusTypeDef ILI9341_DrawBitmapDMA(uint16_t w, uint16_t h, uint8_t *pixels)
 {
-    ILI9341_WriteCommand(0x36);
-    switch (m) {
-        case 0:
-            ILI9341_WriteData(0x48); // MX | BGR
-            break;
-        case 1:
-            ILI9341_WriteData(0x28); // MY | BGR
-            break;
-        case 2:
-            ILI9341_WriteData(0x88); // MX | MY | BGR
-            break;
-        case 3:
-            ILI9341_WriteData(0xE8); // MX | MY | MV | BGR (landscape)
-            break;
+    if (dma_active) return HAL_BUSY;
+    if (w == 0 || h == 0) return HAL_OK;
+    uint32_t count = (uint32_t)w * h * 2U;
+    if (!pixels || w > width || h > height || count > DMA_MAX_BYTES) return HAL_ERROR;
+    HAL_StatusTypeDef result = ILI9341_WriteCommand(0x2C);
+    if (result != HAL_OK) return result;
+    DC_HIGH();
+    CS_LOW();
+    dma_done = false;
+    dma_result = HAL_OK;
+    dma_started = HAL_GetTick();
+    dma_active = true;
+    result = HAL_SPI_Transmit_DMA(&ILI9341_SPI, pixels, (uint16_t)count);
+    if (result != HAL_OK) {
+        dma_active = false;
+        CS_HIGH();
     }
+    return result;
 }
 
-
-// LVGL
-void ILI9341_SetWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+HAL_StatusTypeDef ILI9341_FillScreen(uint16_t color)
 {
-    ILI9341_WriteCommand(0x2A);
-    ILI9341_WriteData(x0 >> 8);
-    ILI9341_WriteData(x0 & 0xFF);
-    ILI9341_WriteData(x1 >> 8);
-    ILI9341_WriteData(x1 & 0xFF);
-
-    ILI9341_WriteCommand(0x2B);
-    ILI9341_WriteData(y0 >> 8);
-    ILI9341_WriteData(y0 & 0xFF);
-    ILI9341_WriteData(y1 >> 8);
-    ILI9341_WriteData(y1 & 0xFF);
-
-    ILI9341_WriteCommand(0x2C);
-}
-
-void ILI9341_DrawBitmap(uint16_t w, uint16_t h, uint8_t *s)
-{
-    ILI9341_WriteCommand(0x2C); // Memory write
+    static uint8_t row[ILI9341_HEIGHT * 2U];
+    HAL_StatusTypeDef result = ILI9341_SetWindow(0, 0, width - 1U, height - 1U);
+    if (result != HAL_OK) return result;
+    for (uint16_t i = 0; i < width; ++i) {
+        row[2U * i] = color >> 8;
+        row[2U * i + 1U] = color & 0xff;
+    }
+    result = ILI9341_WriteCommand(0x2C);
+    if (result != HAL_OK) return result;
     DC_HIGH();
     CS_LOW();
-    HAL_SPI_Transmit(&ILI9341_SPI, s, w * h * 2, HAL_MAX_DELAY);
+    for (uint16_t y = 0; y < height && result == HAL_OK; ++y)
+        result = HAL_SPI_Transmit(&ILI9341_SPI, row, width * 2U, SPI_TIMEOUT_MS);
     CS_HIGH();
+    return result;
 }
 
-void ILI9341_DrawBitmapDMA(uint16_t w, uint16_t h, uint8_t *s)
+HAL_StatusTypeDef ILI9341_DrawPixel(uint16_t x, uint16_t y, uint16_t color)
 {
-    ILI9341_WriteCommand(0x2C); // Memory write
-    DC_HIGH();
-    CS_LOW();
-    HAL_SPI_Transmit_DMA(&ILI9341_SPI, s, w * h * 2);
+    HAL_StatusTypeDef result = ILI9341_SetWindow(x, y, x, y);
+    if (result == HAL_OK) result = ILI9341_WriteCommand(0x2C);
+    if (result == HAL_OK) result = ILI9341_WriteData16(color);
+    return result;
 }
-

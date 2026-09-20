@@ -12,7 +12,7 @@ static const uint32_t palette[] = {
 
 void background_color_clicked(lv_event_t * e)
 {
-    printf("button1_clicked()\r\n");        /* debug proof */
+    (void)e;
 
     static uint8_t idx = 0;                 /* cycles 0‥5 */
 

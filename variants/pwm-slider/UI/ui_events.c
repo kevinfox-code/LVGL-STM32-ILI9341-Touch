@@ -10,14 +10,14 @@
 
 extern TIM_HandleTypeDef htim2;
 
-static char buf[4];
+static char buf[32];
 
 #define PWM_FREQUENCY 40000
 
 void slider_changed(lv_event_t * e)
 {
 	int value = lv_slider_get_value(lv_event_get_target(e));
-	sprintf(buf, "Slider Value: %d", value);
+	snprintf(buf, sizeof(buf), "Slider Value: %d", value);
 
 	lv_textarea_set_text(ui_TextArea1, buf);
 

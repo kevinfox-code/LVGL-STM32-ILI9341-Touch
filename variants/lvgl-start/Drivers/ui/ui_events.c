@@ -4,17 +4,6 @@
 // Project name: first_project
 
 #include "ui.h"
-#include <stdio.h>                  /* for printf */
-#include "stm32f4xx_hal.h"
-extern UART_HandleTypeDef huart2;   /* created by CubeMX */
-
-/* override the weak symbol */
-int __io_putchar(int ch)
-{
-    HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
-    return ch;
-}
-
 static const uint32_t palette[] = {
     0x003a57, 0x00FF00, 0xFF0000,
     0x0000FF, 0x123456, 0x0000ff
@@ -22,7 +11,7 @@ static const uint32_t palette[] = {
 
 void button1_clicked(lv_event_t * e)
 {
-    printf("button1_clicked()\r\n");        /* debug proof */
+    (void)e;
 
     static uint8_t idx = 0;                 /* cycles 0‥5 */
 

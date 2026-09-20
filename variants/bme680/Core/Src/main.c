@@ -139,7 +139,7 @@ int main(void)
   lv_port_disp_init();
 
   TouchController_Init();
-  touch_calibrate();
+  /* Optional: call touch_calibrate() to calibrate this panel in RAM. */
 
   ui_init();
 
@@ -147,7 +147,7 @@ int main(void)
   lv_arc_set_range(ui_HumidArc, 0, 100); // Humidity arc: 0–100% RH
   pressure_chart_init();
 
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK) Error_Handler();
 
   // — Initialize the sensor over I2C1 at address 0x77 —
   if (BME68x_Init(&hbme, &hi2c1, BME68X_I2C_ADDR_HIGH) != BME68X_OK) {
@@ -179,7 +179,8 @@ int main(void)
 	  struct bme68x_data data;
 	  uint8_t n_fields;
 
-	  if (BME68x_ReadData(&hbme, &data, &n_fields) == BME68X_OK && n_fields) {
+	  int8_t sensor_result = BME68x_ReadData(&hbme, &data, &n_fields);
+	  if (sensor_result == BME68X_OK && n_fields) {
 
 		// --- Temperature Card ---
 		float temp_c = data.temperature;
@@ -234,13 +235,12 @@ int main(void)
 		}
 
 		// Update the chart history
-		static uint8_t pressure_idx = 0;
-		pressure_history[pressure_idx] = pres_hpa;
-		pressure_idx = (pressure_idx + 1) % PRESSURE_HISTORY_LEN;
-		lv_chart_refresh(ui_PressureChart);
+		lv_chart_set_next_value(ui_PressureChart, pressure_series, (int32_t)pres_hpa);
 
 
 		// --- Air Resistance Card ---
+		if ((data.status & (BME68X_GASM_VALID_MSK | BME68X_HEAT_STAB_MSK)) ==
+		    (BME68X_GASM_VALID_MSK | BME68X_HEAT_STAB_MSK)) {
 		float gas_kohm = data.gas_resistance / 1000.0f;
 		char air_str[16];
 		snprintf(air_str, sizeof(air_str), "%.1f kΩ", gas_kohm);
@@ -252,8 +252,11 @@ int main(void)
 		else if (gas_kohm > 10) air_color = lv_color_hex(0xFFFF00);
 		else air_color = lv_color_hex(0xFF0000);
 		lv_obj_set_style_text_color(ui_AirResistanceOutputLabel, air_color, LV_PART_MAIN | LV_STATE_DEFAULT);
+		} else {
+		    lv_label_set_text(ui_AirResistanceOutputLabel, "Warming up");
+		}
 
-	  } else {
+	  } else if (sensor_result < BME68X_OK) {
 		  printf("Failed to read data or no fields available.\r\n");
 	  }
 
@@ -383,7 +386,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -491,7 +494,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA2_Stream3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
 
 }
@@ -518,7 +521,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, T_CS_Pin|CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, T_CS_Pin|CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DC_GPIO_Port, DC_Pin, GPIO_PIN_RESET);
@@ -539,8 +542,8 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : T_IRQ_Pin */
   GPIO_InitStruct.Pin = T_IRQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(T_IRQ_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : DC_Pin */
@@ -551,8 +554,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(DC_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+  /* Touch uses pressure polling; no PENIRQ interrupt is needed. */
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

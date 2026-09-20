@@ -10,12 +10,12 @@
 
 extern TIM_HandleTypeDef htim2;
 
-static char buf[4];
+static char buf[32];
 
 void slider_changed(lv_event_t * e)
 {
 	int value = lv_slider_get_value(lv_event_get_target(e));
-	sprintf(buf, "Slider Value: %d", value);
+	snprintf(buf, sizeof(buf), "Slider Value: %d", value);
 
 	lv_textarea_set_text(ui_TextArea1, buf);
 	if (value < 0) {
@@ -23,7 +23,8 @@ void slider_changed(lv_event_t * e)
 	} else if (value > 100) {
 		value = 100;
 	}
-	TIM2->CCR1 = value;
+	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1,
+        (uint32_t)value * (__HAL_TIM_GET_AUTORELOAD(&htim2) + 1U) / 100U);
 
 }
 

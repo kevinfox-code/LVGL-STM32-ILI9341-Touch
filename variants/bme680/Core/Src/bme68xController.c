@@ -45,7 +45,7 @@ static int8_t bme68x_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, voi
                              I2C_MEMADD_SIZE_8BIT,
                              reg_data,
                              len,
-                             HAL_MAX_DELAY) == HAL_OK)
+                             100U) == HAL_OK)
            ? BME68X_OK : BME68X_E_COM_FAIL;
 }
 
@@ -58,16 +58,18 @@ static int8_t bme68x_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t l
                               I2C_MEMADD_SIZE_8BIT,
                               (uint8_t*)reg_data,
                               len,
-                              HAL_MAX_DELAY) == HAL_OK)
+                              100U) == HAL_OK)
            ? BME68X_OK : BME68X_E_COM_FAIL;
 }
 
 // Delay callback: converts microseconds to ms
 static void bme68x_delay_us(uint32_t period_us, void *intf_ptr) {
-    HAL_Delay((period_us + 999) / 1000);
+    (void)intf_ptr;
+    HAL_Delay(period_us / 1000U + (period_us % 1000U != 0));
 }
 
 int8_t BME68x_Init(BME68x_HandleTypeDef *h, I2C_HandleTypeDef *hi2c, uint8_t address) {
+    if (!h || !hi2c) return BME68X_E_NULL_PTR;
     memset(h, 0, sizeof(*h));
     h->hi2c    = hi2c;
     h->address = address;
@@ -85,6 +87,8 @@ int8_t BME68x_Config(BME68x_HandleTypeDef *h,
                      uint8_t os_temp, uint8_t os_pres, uint8_t os_hum,
                      uint8_t filter,
                      uint16_t heatr_temp, uint16_t heatr_dur) {
+    if (!h) return BME68X_E_NULL_PTR;
+    h->measurement_pending = false;
     int8_t rslt = bme68x_get_conf(&h->conf, &h->dev);
     if (rslt != BME68X_OK) return rslt;
     h->conf.os_temp = os_temp;
@@ -102,17 +106,23 @@ int8_t BME68x_Config(BME68x_HandleTypeDef *h,
 
 int8_t BME68x_ReadData(BME68x_HandleTypeDef *h,
                        struct bme68x_data *data, uint8_t *n_fields) {
-    int8_t rslt;
-    uint8_t fields = 0;
-    rslt = bme68x_set_op_mode(BME68X_FORCED_MODE, &h->dev);
-    if (rslt != BME68X_OK) { *n_fields = 0; return rslt; }
-    uint32_t wait_us = bme68x_get_meas_dur(BME68X_FORCED_MODE, &h->conf, &h->dev)
-                     + (h->heatr_conf.heatr_dur * 1000);
-    HAL_Delay((wait_us + 999) / 1000);
-    rslt = bme68x_get_data(BME68X_FORCED_MODE, data, &fields, &h->dev);
-    if (rslt != BME68X_OK || fields == 0) { *n_fields = 0; return rslt; }
-    *n_fields = fields;
-    return BME68X_OK;
+    if (!n_fields) return BME68X_E_NULL_PTR;
+    *n_fields = 0;
+    if (!h || !data) return BME68X_E_NULL_PTR;
+    if (!h->measurement_pending) {
+        int8_t result = bme68x_set_op_mode(BME68X_FORCED_MODE, &h->dev);
+        if (result != BME68X_OK) return result;
+        uint32_t wait_us = bme68x_get_meas_dur(BME68X_FORCED_MODE, &h->conf, &h->dev)
+                         + (uint32_t)h->heatr_conf.heatr_dur * 1000U;
+        h->measurement_wait_ms = wait_us / 1000U + (wait_us % 1000U != 0);
+        h->measurement_started = HAL_GetTick();
+        h->measurement_pending = true;
+        return BME68X_W_NO_NEW_DATA;
+    }
+    if ((uint32_t)(HAL_GetTick() - h->measurement_started) < h->measurement_wait_ms)
+        return BME68X_W_NO_NEW_DATA;
+    h->measurement_pending = false;
+    return bme68x_get_data(BME68X_FORCED_MODE, data, n_fields, &h->dev);
 }
 
 uint32_t BME68x_CalcMeasurementDuration(BME68x_HandleTypeDef *h, uint8_t op_mode) {
