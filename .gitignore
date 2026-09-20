@@ -1,0 +1,7 @@
+/build*/
+/tests/build/
+**/Debug/
+**/Release/
+.DS_Store
+Thumbs.db
+__pycache__/

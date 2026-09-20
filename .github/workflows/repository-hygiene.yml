@@ -1,1 +1,40 @@
-name: Repository hygiene\non:\n  push:\n  pull_request:\npermissions:\n  contents: read\njobs:\n  hygiene:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Check out repository\n        uses: actions/checkout@v4\n      - name: Require a README\n        run: test -s README.md\n      - name: Reject tracked OS metadata\n        run: '! git ls-files | grep -E "(^|/)(\\.DS_Store|Thumbs\\.db)$"'\n
+name: Firmware checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check repository hygiene and driver parity
+        run: python3 scripts/check_repository.py
+      - name: Build and run host regression tests
+        run: |
+          cmake -S tests -B build/tests -DCMAKE_C_COMPILER=clang
+          cmake --build build/tests --parallel 2
+          ctest --test-dir build/tests --timeout 30 --output-on-failure
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [bme680, pwm-slider, squareline-base, lvgl-start]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Build firmware
+        run: |
+          cmake -S . -B build/firmware -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake -DVARIANT=${{ matrix.variant }}
+          cmake --build build/firmware --parallel 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.variant }}
+          path: |
+            build/firmware/firmware.elf
+            build/firmware/firmware.hex
+            build/firmware/firmware.bin
+            build/firmware/firmware.map
